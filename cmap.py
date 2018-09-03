@@ -9,6 +9,7 @@ with warnings.catch_warnings():
     from matplotlib.colorbar import ColorbarBase
     from matplotlib import colors
     from mpl_toolkits.axes_grid1 import make_axes_locatable
+    # TODO: Drop this dependency
     from scipy.ndimage import rotate
 
 
