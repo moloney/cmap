@@ -38,6 +38,8 @@ you can see the base image. Another common case is supplying a mask
 so that the parameter overlay will only be visible within a certain 
 region of interest.
 
+::
+
     $ cmap base.nii param_map.nii -m my_roi.nii
 
 Use the `--help` option to see other more advanced options.
