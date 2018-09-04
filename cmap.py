@@ -150,9 +150,9 @@ class Overlay(object):
         img = ax.imshow(fg_rgba)
         divider = make_axes_locatable(ax)
         if histo_bins:
-            hax = divider.append_axes("right", size="10%", pad=0.05*scale)
+            hax = divider.append_axes("right", size="15%", pad=0.01*scale)
             hax.set_axis_off()
-            hax.margins(x=0.001, y=0.001)
+            hax.margins(x=0.01, y=0.001)
             self.plot_color_hist(data_index, 
                                  hax, 
                                  hist_kwargs={'orientation' : 'horizontal',
@@ -163,7 +163,10 @@ class Overlay(object):
                                  scale=scale,
                                 )
             hax.invert_xaxis()
-        cax = divider.append_axes("right", size="5%", pad=0.05*scale)
+            cax_pad = 0.001
+        else:
+            cax_pad = 0.1 * scale
+        cax = divider.append_axes("right", size="5%", pad=cax_pad)
         cax.tick_params(labelsize=10*scale, length=7*scale, width=1.5*scale, pad=5*scale)
         cb = ColorbarBase(cax,
                           cmap=self.cmap,
