@@ -33,10 +33,8 @@ and `0.5`.
 
     $ cmap base.nii param_map.nii -d 0.01,0.5
 
-Values below the minimum will be made transparent by default so that
-you can see the base image. Another common case is supplying a mask 
-so that the parameter overlay will only be visible within a certain 
-region of interest.
+Another common case is supplying a mask so that the parameter overlay 
+will only be visible within a certain region of interest.
 
 ::
 

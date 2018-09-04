@@ -47,7 +47,7 @@ class AlphaMap(object):
         if self._data_range is None:
             self._data_range = (None, None)
         if alpha_bounds is None:
-            self._alpha_bounds = (0.0, self._alpha_range[1])
+            self._alpha_bounds = self._alpha_range
         else:
             if len(alpha_bounds) != 2:
                 raise ValueError("alpha_bounds must be two element tuple")
@@ -80,7 +80,7 @@ class Overlay(object):
         self.data = np.atleast_3d(data)
         if mask is not None:
             check_dim(mask)
-            self.mask = np.atleast_3d(mask)
+            self.mask = np.atleast_3d(mask).copy()
         else:
             self.mask = np.ones_like(self.data)
         self.cmap = cmap
@@ -114,7 +114,61 @@ class Overlay(object):
         rgba[...,3] = alpha
         # matplotlib chokes on -0, so take absolute value
         return np.abs(rgba)
-        
+    
+    def plot_color_hist(self, index, ax, hist_kwargs=None, scale=1.0):
+        if hist_kwargs is None:
+            hist_kwargs = {}
+        if 'bins' not in hist_kwargs:
+            hist_kwargs['bins'] = 64
+        hist_kwargs['range'] = self.cmap_bounds
+        cmap_lb, cmap_ub = self.cmap_bounds
+        if self.cmap is None:
+            cmap = getattr(pylab.cm, default_cmaps[0])
+        else:
+            cmap = getattr(pylab.cm, self.cmap)
+        d_sub = self.data[index].copy()
+        # We want our histogram to reflect what is visible in the 
+        # overlay, so we need to consider the alpha map
+        alpha = self.alpha_map.apply(d_sub)
+        alpha[self.mask[index] == 0] = 0.0
+        alpha[alpha > 1] = 1.0
+        alpha[alpha < 0] = 0.0
+        incl_data = d_sub[alpha != 0.0]
+        incl_data[incl_data < cmap_lb] = cmap_lb
+        incl_data[incl_data > cmap_ub] = cmap_ub
+        n, bins, patches = ax.hist(incl_data, **hist_kwargs)
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+        col = (bin_centers - cmap_lb) / cmap_ub
+        for c, p in zip(col, patches):
+            pylab.setp(p, 'facecolor', cmap(c))
+            pylab.setp(p, 'edgecolor', 'k')
+            pylab.setp(p, 'linewidth', 0.5*scale)
+    
+    def plot(self, data_index, ax, histo_bins=50, scale=1.0):
+        fg_rgba = rotate(self.get_rgba(data_index), 90)
+        fg_rgba = np.abs(fg_rgba)
+        img = ax.imshow(fg_rgba)
+        divider = make_axes_locatable(ax)
+        if histo_bins:
+            hax = divider.append_axes("right", size="10%", pad=0.05*scale)
+            hax.set_axis_off()
+            hax.margins(x=0.001, y=0.001)
+            self.plot_color_hist(data_index, 
+                                 hax, 
+                                 hist_kwargs={'orientation' : 'horizontal',
+                                              'align' : 'left',
+                                              'density' : 1,
+                                              'bins' : histo_bins,
+                                             },
+                                 scale=scale,
+                                )
+            hax.invert_xaxis()
+        cax = divider.append_axes("right", size="5%", pad=0.05*scale)
+        cax.tick_params(labelsize=10*scale, length=7*scale, width=1.5*scale, pad=5*scale)
+        cb = ColorbarBase(cax,
+                          cmap=self.cmap,
+                          norm=colors.Normalize(*self.cmap_bounds))
+        cb.outline.set_linewidth(1.0*scale)
 
 
 default_cmaps = ['plasma',
@@ -122,8 +176,7 @@ default_cmaps = ['plasma',
                  'copper',
                 ]
 
-
-def plot_slices(bg_img, overlays, slice_dim=None, title=None):
+def check_shapes(bg_img, overlays):
     if bg_img.ndim not in (2, 3):
         raise ValueError("Images must be 2D/3D arrays")
     bg_img = np.atleast_3d(bg_img)
@@ -131,7 +184,14 @@ def plot_slices(bg_img, overlays, slice_dim=None, title=None):
     for overlay in overlays:
         if overlay.data.shape != shape:
             raise ValueError("Background / foreground image dimensions don't match")
+    return bg_img, shape
 
+
+def gen_slice_plots(bg_img, overlays, slice_dim=None, title=None, 
+                    histo_bins=64, max_slice_per_fig=None):
+    '''Generates one or more figures with one or more slices per figure
+    '''
+    bg_img, shape = check_shapes(bg_img, overlays)
     # Choose slice axis if none was specified
     if slice_dim is None:
         min_dim = np.argmin(shape)
@@ -139,7 +199,6 @@ def plot_slices(bg_img, overlays, slice_dim=None, title=None):
             slice_dim = min_dim
         else:
             slice_dim = 2
-    
     # TODO: Should determine slice orientation relative to the patient
     #       and then lay out rows / cols in radiological or neurological
     #       standard.  Instead of transposing, probably better to just 
@@ -153,8 +212,20 @@ def plot_slices(bg_img, overlays, slice_dim=None, title=None):
 
     # Compute plot grid size
     n_slices = bg_img.shape[2]
-    n_cols = int(math.ceil(math.sqrt(n_slices)))
-    n_rows = int(math.ceil(float(n_slices) / n_cols))
+    if max_slice_per_fig is not None:
+        n_fig = n_slices // max_slice_per_fig
+        if n_slices % max_slice_per_fig != 0:
+            n_fig += 1
+        slice_per_fig = min(n_slices, max_slice_per_fig)
+    else:
+        n_fig = 1
+        slice_per_fig = n_slices
+    n_cols = int(math.ceil(math.sqrt(slice_per_fig)))
+    n_rows = int(math.ceil(float(slice_per_fig) / n_cols))
+    if slice_per_fig > 1:
+        scale = 1.0 / math.sqrt(slice_per_fig)
+    else:
+        scale = 1.0
     
     # Compute display scaling factor
     v_max = np.mean(bg_img) * 4
@@ -172,43 +243,37 @@ def plot_slices(bg_img, overlays, slice_dim=None, title=None):
                 overlay.cmap = default_cmaps[0]
     
     # Build the matplotlib figure
-    fig = pylab.figure()
-    gs = gridspec.GridSpec(n_rows, n_cols)
-    gs.update(wspace=0.05, hspace=0.05)
-    ax_array = [fig.add_subplot(gs[i]) for i in range(n_slices)]
-    for slice_idx in range(n_slices):
-        ax = ax_array[slice_idx]
-        if title is not None:
-            #ax.set_title(title, fontsize=4)
-            ax.text(.5, 1.03, title, fontsize=3,
-                    horizontalalignment='center',
-                    transform=ax.transAxes, color='k')
-        ax.tick_params(axis='both',
-                       which='both',
-                       labelleft='off',
-                       labelbottom='off',
-                       bottom='off',
-                       top='off',
-                       left='off',
-                       right='off')
-        ax.set_axis_off()
-        bg_slice = rotate(bg_img[...,slice_idx], 90)
-        bg_plt = ax.imshow(bg_slice, cmap='gray', vmin=0, vmax=v_max)
-        for overlay in overlays:
-            fg_rgba = rotate(overlay.get_rgba((Ellipsis,slice_idx)), 90)
-            fg_rgba = np.abs(fg_rgba)
-            img = ax.imshow(fg_rgba)
-            divider = make_axes_locatable(ax)
-            cax = divider.append_axes("right", size="5%", pad=0.05)
-            cax.tick_params(labelsize=2, length=1, width=0.25, pad=1)
-            cb = ColorbarBase(cax,
-                              cmap=overlay.cmap,
-                              norm=colors.Normalize(*overlay.cmap_bounds))
-            cb.outline.set_linewidth(0.25)
-    # Ironically this seems to "loosen" the layout and prevent 
-    # overlapping of titles and images
-    gs.tight_layout(fig)
-    return fig
+    for fig_idx in range(n_fig):
+        fig = pylab.figure()
+        if slice_per_fig > 1:
+            gs = gridspec.GridSpec(n_rows, n_cols)
+            gs.update(left=0.02,right=.98, bottom=0.02, top=0.98, wspace=0.02, hspace=0.02)
+            ax_array = [fig.add_subplot(gs[i]) for i in range(slice_per_fig)]
+        else:
+            ax_array = [fig.gca()]
+        for slice_fig_idx in range(slice_per_fig):
+            ax = ax_array[slice_fig_idx]
+            ax.set_axis_off()
+            ax.margins(x=0.02, y=0.02)
+            slice_idx = (fig_idx * slice_per_fig) + slice_fig_idx
+            if slice_idx >= n_slices:
+                continue
+            d_idx = (Ellipsis, slice_idx)
+            if title is not None:
+                ax.text(.5, 1.01, title, fontsize=16*scale,
+                        horizontalalignment='center',
+                        transform=ax.transAxes, color='k')
+            
+            
+            bg_slice = rotate(bg_img[d_idx], 90)
+            bg_plt = ax.imshow(bg_slice, cmap='gray', vmin=0, vmax=v_max)
+            for overlay in overlays:
+                overlay.plot(d_idx, ax, histo_bins, scale=scale)
+        # Ironically this seems to "loosen" the layout and prevent 
+        # overlapping of titles and images
+        if slice_per_fig > 1:
+            gs.tight_layout(fig, pad=0.02)
+        yield fig, scale
 
 
 prog_descrip = \
@@ -238,6 +303,14 @@ def main(argv=sys.argv):
     arg_parser.add_argument('--alpha-bounds', default=None,
                             help=("Alpha values to use for data values "
                                   "outside the mapped range"))
+    arg_parser.add_argument('--histo-bins', default=64, type=int,
+                            help=("Number of bins for histogram-"
+                                  "colorbar, set to zero to disable"))
+    arg_parser.add_argument('--slices-per-fig', default=None, 
+                            help="Split up slices onto multiple figures")
+    arg_parser.add_argument('--dpi', default=300, type=int,
+                            help='Resolution of output image. We scale '
+                            'this by sqrt of # slices in figure.')
     args = arg_parser.parse_args()
     if args.slice_dim is not None:
         args.slice_dim = int(args.slice_dim)
@@ -251,7 +324,8 @@ def main(argv=sys.argv):
         args.alpha_range = tuple(float(x) for x in args.alpha_range.split(','))
     if args.alpha_bounds is not None:
         args.alpha_bounds = tuple(float(x) for x in args.alpha_bounds.split(','))
-    
+    if args.slices_per_fig is not None:
+        args.slices_per_fig = int(args.slices_per_fig)  
     bg_nii = nb.load(args.bg_img)
     bg_img = bg_nii.get_data()
     
@@ -272,9 +346,25 @@ def main(argv=sys.argv):
                       args.data_range,
                       alpha_map)
     
-    fig = plot_slices(bg_img, [overlay], args.slice_dim, title=args.title)
-    pylab.savefig(args.output, dpi=900)
-
+    
+    figs = gen_slice_plots(bg_img, 
+                           [overlay], 
+                           args.slice_dim, 
+                           title=args.title, 
+                           histo_bins=args.histo_bins,
+                           max_slice_per_fig=args.slices_per_fig)
+    for fig_idx, (fig, scale) in enumerate(figs):
+        fig_dpi = int(args.dpi / scale)
+        if args.slices_per_fig is None:
+            assert fig_idx == 0
+            fig.savefig(args.output, dpi=fig_dpi)
+        else:
+            toks = args.output.split('.')
+            base = '.'.join(toks[:-1])
+            ext = toks[-1]
+            full_out = base + ('-%03d' % fig_idx) + '.' + ext
+            fig.savefig(full_out, dpi=fig_dpi)
+        pylab.close(fig)
 
 if __name__ == '__main__':
     sys.exit(main())
