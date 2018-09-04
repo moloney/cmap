@@ -134,6 +134,8 @@ class Overlay(object):
         alpha[alpha > 1] = 1.0
         alpha[alpha < 0] = 0.0
         incl_data = d_sub[alpha != 0.0]
+        if incl_data.size == 0:
+            return
         incl_data[incl_data < cmap_lb] = cmap_lb
         incl_data[incl_data > cmap_ub] = cmap_ub
         n, bins, patches = ax.hist(incl_data, **hist_kwargs)
@@ -250,14 +252,14 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, title=None,
         fig = pylab.figure()
         if slice_per_fig > 1:
             gs = gridspec.GridSpec(n_rows, n_cols)
-            gs.update(left=0.02,right=.98, bottom=0.02, top=0.98, wspace=0.02, hspace=0.02)
+            gs.update(left=0.02,right=.98, bottom=0.02, top=0.98, wspace=0.8*scale, hspace=0.1)
             ax_array = [fig.add_subplot(gs[i]) for i in range(slice_per_fig)]
         else:
             ax_array = [fig.gca()]
         for slice_fig_idx in range(slice_per_fig):
             ax = ax_array[slice_fig_idx]
             ax.set_axis_off()
-            ax.margins(x=0.02, y=0.02)
+            ax.margins(x=0.02*scale, y=0.02*scale)
             slice_idx = (fig_idx * slice_per_fig) + slice_fig_idx
             if slice_idx >= n_slices:
                 continue
@@ -272,10 +274,6 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, title=None,
             bg_plt = ax.imshow(bg_slice, cmap='gray', vmin=0, vmax=v_max)
             for overlay in overlays:
                 overlay.plot(d_idx, ax, histo_bins, scale=scale)
-        # Ironically this seems to "loosen" the layout and prevent 
-        # overlapping of titles and images
-        if slice_per_fig > 1:
-            gs.tight_layout(fig, pad=0.02)
         yield fig, scale
 
 
