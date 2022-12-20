@@ -66,7 +66,7 @@ class AlphaMap(object):
         alpha[data > max_data] = self._alpha_bounds[1]
         min_alpha, max_alpha = self._alpha_range
         in_range = (min_data <= data) & (data <= max_data)
-        alpha[in_range] = (data[in_range] - min_data) / max_data
+        alpha[in_range] = (data[in_range] - min_data) / (max_data - min_data)
         alpha[in_range] *= max_alpha - min_alpha
         alpha[in_range] += min_alpha
         return alpha
@@ -75,7 +75,7 @@ class AlphaMap(object):
 class Overlay(object):
     '''Represent single data overlay'''
     def __init__(self, data, mask=None, cmap=None, cmap_bounds=None,
-                 alpha_map=None):
+                 alpha_map=None, interpolation=None):
         check_dim(data)
         self.data = np.atleast_3d(data)
         if mask is not None:
@@ -92,10 +92,14 @@ class Overlay(object):
             self.alpha_map = AlphaMap(1.0, cmap_bounds)
         else:
             self.alpha_map = alpha_map
+        self.interpolation = interpolation
         
     def transpose(self, new_order):
         self.data = np.transpose(self.data, new_order)
         self.mask = np.transpose(self.mask, new_order)
+        
+    def is_empty(self, index):
+        return np.count_nonzero(self.mask[index]) == 0
     
     def get_rgba(self, index):
         d_sub = self.data[index].copy()
@@ -106,12 +110,16 @@ class Overlay(object):
         cmap_lb, cmap_ub = self.cmap_bounds
         d_sub[d_sub > cmap_ub] = cmap_ub
         d_sub[d_sub < cmap_lb] = cmap_lb
+        d_sub -= cmap_lb
+        d_sub /= (cmap_ub - cmap_lb)
         if self.cmap is None:
             cmap = getattr(pylab.cm, default_cmaps[0])
         else:
             cmap = getattr(pylab.cm, self.cmap)
-        rgba = cmap((d_sub - cmap_lb) / cmap_ub)
+        rgba = cmap(d_sub)
+        del d_sub
         rgba[...,3] = alpha
+        del alpha
         # matplotlib chokes on -0, so take absolute value
         return np.abs(rgba)
     
@@ -140,7 +148,7 @@ class Overlay(object):
         incl_data[incl_data > cmap_ub] = cmap_ub
         n, bins, patches = ax.hist(incl_data, **hist_kwargs)
         bin_centers = 0.5 * (bins[:-1] + bins[1:])
-        col = (bin_centers - cmap_lb) / cmap_ub
+        col = (bin_centers - cmap_lb) / (cmap_ub - cmap_lb)
         for c, p in zip(col, patches):
             pylab.setp(p, 'facecolor', cmap(c))
             pylab.setp(p, 'edgecolor', 'k')
@@ -148,8 +156,7 @@ class Overlay(object):
     
     def plot(self, data_index, ax, histo_bins=50, scale=1.0):
         fg_rgba = rotate(self.get_rgba(data_index), 90)
-        fg_rgba = np.abs(fg_rgba)
-        img = ax.imshow(fg_rgba)
+        img = ax.imshow(fg_rgba, interpolation=self.interpolation)
         divider = make_axes_locatable(ax)
         if histo_bins:
             hax = divider.append_axes("right", size="15%", pad=0.01*scale)
@@ -180,6 +187,7 @@ default_cmaps = ['plasma',
                  'virdis',
                  'copper',
                 ]
+'''Default selection of colormaps are all perceptually linear'''
 
 def check_shapes(bg_img, overlays):
     if bg_img.ndim not in (2, 3):
@@ -192,8 +200,10 @@ def check_shapes(bg_img, overlays):
     return bg_img, shape
 
 
-def gen_slice_plots(bg_img, overlays, slice_dim=None, title=None, 
-                    histo_bins=64, max_slice_per_fig=None):
+def gen_slice_plots(bg_img, overlays, slice_dim=None, bg_range=None,
+                    title=None, exclude_empty=False, loc_info=False, 
+                    bg_interpolation='bilinear', histo_bins=64, 
+                    max_slice_per_fig=None):
     '''Generates one or more figures with one or more slices per figure
     '''
     bg_img, shape = check_shapes(bg_img, overlays)
@@ -214,17 +224,32 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, title=None,
     bg_img = np.transpose(bg_img, new_order)
     for overlay in overlays:
         overlay.transpose(new_order)
+    n_slices = bg_img.shape[2]
+
+    # Get list of non-empty slices
+    if exclude_empty:
+        incl_slices = []
+        for slice_idx in range(n_slices):
+            for olay in overlays:
+                if  not olay.is_empty((Ellipsis, slice_idx)):
+                    break
+            else:
+                continue
+            incl_slices.append(slice_idx)
+        print("Including slices: %s" % incl_slices)
+    else:
+        incl_slices = range(n_slices)
+    n_incl_slices = len(incl_slices)
 
     # Compute plot grid size
-    n_slices = bg_img.shape[2]
     if max_slice_per_fig is not None:
-        n_fig = n_slices // max_slice_per_fig
-        if n_slices % max_slice_per_fig != 0:
+        n_fig = n_incl_slices // max_slice_per_fig
+        if n_incl_slices % max_slice_per_fig != 0:
             n_fig += 1
-        slice_per_fig = min(n_slices, max_slice_per_fig)
+        slice_per_fig = min(n_incl_slices, max_slice_per_fig)
     else:
         n_fig = 1
-        slice_per_fig = n_slices
+        slice_per_fig = n_incl_slices
     n_cols = int(math.ceil(math.sqrt(slice_per_fig)))
     n_rows = int(math.ceil(float(slice_per_fig) / n_cols))
     if slice_per_fig > 1:
@@ -233,7 +258,10 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, title=None,
         scale = 1.0
     
     # Compute display scaling factor
-    v_max = np.mean(bg_img) * 4
+    # TODO: Need something better here
+    if bg_range is None:
+        bg_min, bg_max = robust_min_max(bg_img)
+        bg_range = (bg_min / 2, bg_max)
     
     # Make sure each overlay has a color map, try to make them unique
     used_cmaps = [o.cmap for o in overlays if o.cmap is not None]
@@ -248,8 +276,10 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, title=None,
                 overlay.cmap = default_cmaps[0]
     
     # Build the matplotlib figure
+    curr_slice_idx = 0
     for fig_idx in range(n_fig):
         fig = pylab.figure()
+        fig_slices = []
         if slice_per_fig > 1:
             gs = gridspec.GridSpec(n_rows, n_cols)
             gs.update(left=0.02,right=.98, bottom=0.02, top=0.98, wspace=0.8*scale, hspace=0.1)
@@ -257,24 +287,33 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, title=None,
         else:
             ax_array = [fig.gca()]
         for slice_fig_idx in range(slice_per_fig):
+            slice_idx = incl_slices[curr_slice_idx]
+            fig_slices.append(slice_idx)
             ax = ax_array[slice_fig_idx]
             ax.set_axis_off()
             ax.margins(x=0.02*scale, y=0.02*scale)
-            slice_idx = (fig_idx * slice_per_fig) + slice_fig_idx
-            if slice_idx >= n_slices:
-                continue
             d_idx = (Ellipsis, slice_idx)
             if title is not None:
                 ax.text(.5, 1.01, title, fontsize=16*scale,
                         horizontalalignment='center',
                         transform=ax.transAxes, color='k')
-            
-            
+            if loc_info:
+                loc_text = 'Slice %d' % slice_idx
+                ax.text(.5, -0.035, loc_text, fontsize=11*scale,
+                        horizontalalignment='center',
+                        transform=ax.transAxes, color='k')
             bg_slice = rotate(bg_img[d_idx], 90)
-            bg_plt = ax.imshow(bg_slice, cmap='gray', vmin=0, vmax=v_max)
+            bg_plt = ax.imshow(bg_slice, 
+                               cmap='gray', 
+                               vmin=bg_range[0], 
+                               vmax=bg_range[1],
+                               interpolation=bg_interpolation)
             for overlay in overlays:
                 overlay.plot(d_idx, ax, histo_bins, scale=scale)
-        yield fig, scale
+            curr_slice_idx += 1
+            if curr_slice_idx == len(incl_slices):
+                break
+        yield fig_slices, fig, scale
 
 
 prog_descrip = \
@@ -299,6 +338,17 @@ def main(argv=sys.argv):
     arg_parser.add_argument('-a', '--alpha', default=None,
                             help="Single alpha value comma separated "
                             "lower,upper values")
+    arg_parser.add_argument('-b', '--bg-range', default=None,
+                            help="Give lower,upper bounds for grayscale "
+                            "background")
+    arg_parser.add_argument('--bg-interp', default='bilinear',
+                            help="Interpolation mode for bg image")
+    arg_parser.add_argument('--fg-interp', default='bilinear',
+                            help='Interpolation mode for fg image')
+    arg_parser.add_argument('-e', '--exclude-empty', action='store_true',
+                            help="Exclude slices with no masked voxels")
+    arg_parser.add_argument('-l', '--location', action='store_true',
+                            help="Add slice location under each image")
     arg_parser.add_argument('--alpha-range', default=None,
                             help="Range of data to map alpha values on")
     arg_parser.add_argument('--alpha-bounds', default=None,
@@ -325,6 +375,8 @@ def main(argv=sys.argv):
         args.alpha_range = tuple(float(x) for x in args.alpha_range.split(','))
     if args.alpha_bounds is not None:
         args.alpha_bounds = tuple(float(x) for x in args.alpha_bounds.split(','))
+    if args.bg_range is not None:
+        args.bg_range = tuple(float(x) for x in args.bg_range.split(','))
     if args.slices_per_fig is not None:
         args.slices_per_fig = int(args.slices_per_fig)  
     bg_nii = nb.load(args.bg_img)
@@ -345,16 +397,20 @@ def main(argv=sys.argv):
                       mask, 
                       args.color_map, 
                       args.data_range,
-                      alpha_map)
+                      alpha_map,
+                      args.fg_interp)
     
     
     figs = gen_slice_plots(bg_img, 
                            [overlay], 
-                           args.slice_dim, 
+                           slice_dim=args.slice_dim, 
+                           bg_range=args.bg_range,
                            title=args.title, 
+                           exclude_empty=args.exclude_empty,
+                           loc_info=args.location,
                            histo_bins=args.histo_bins,
                            max_slice_per_fig=args.slices_per_fig)
-    for fig_idx, (fig, scale) in enumerate(figs):
+    for fig_idx, (slice_indices, fig, scale) in enumerate(figs):
         fig_dpi = int(args.dpi / scale)
         if args.slices_per_fig is None:
             assert fig_idx == 0
@@ -363,7 +419,12 @@ def main(argv=sys.argv):
             toks = args.output.split('.')
             base = '.'.join(toks[:-1])
             ext = toks[-1]
-            full_out = base + ('-%03d' % fig_idx) + '.' + ext
+            #full_out = base + ('-%03d' % fig_idx) + '.' + ext
+            if args.slices_per_fig == 1:
+                assert len(slice_indices) == 1
+                full_out = '%s_slice_%03d.%s' % (base, slice_indices[0], ext)
+            else:
+                full_out = '%s_fig_%03d.%s' % (base, fig_idx, ext)
             fig.savefig(full_out, dpi=fig_dpi)
         pylab.close(fig)
 
