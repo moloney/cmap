@@ -8,6 +8,7 @@ with warnings.catch_warnings():
     from matplotlib import gridspec
     from matplotlib.colorbar import ColorbarBase
     from matplotlib import colors
+    from matplotlib.backends.backend_pdf import PdfPages
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     # TODO: Drop this dependency
     from scipy.ndimage import rotate
@@ -359,10 +360,18 @@ def main(argv=sys.argv):
                                   "colorbar, set to zero to disable"))
     arg_parser.add_argument('--slices-per-fig', default=None, 
                             help="Split up slices onto multiple figures")
+    arg_parser.add_argument("--multi-page", action="store_true",
+                            help="Create a single multi-page output file instead of "
+                            "one per figure. Only works with PDF output")
     arg_parser.add_argument('--dpi', default=300, type=int,
                             help='Resolution of output image. We scale '
                             'this by sqrt of # slices in figure.')
     args = arg_parser.parse_args()
+    if args.multi_page:
+        if not args.output.endswith(".pdf"):
+            print("The '--multi-page' option only works with PDF output")
+            return 1
+        mp_pdf = PdfPages(args.output)
     if args.slice_dim is not None:
         args.slice_dim = int(args.slice_dim)
     if args.data_range is not None:
@@ -415,6 +424,8 @@ def main(argv=sys.argv):
         if args.slices_per_fig is None:
             assert fig_idx == 0
             fig.savefig(args.output, dpi=fig_dpi)
+        elif args.multi_page:
+            mp_pdf.savefig(fig, dpi=fig_dpi)
         else:
             toks = args.output.split('.')
             base = '.'.join(toks[:-1])
