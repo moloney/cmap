@@ -1,5 +1,6 @@
 #! /usr/bin/env python
-import sys, os, math, argparse, warnings
+import sys, math, argparse, warnings
+from typing import Iterable, List, Optional, Tuple
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     import nibabel as nb
@@ -34,6 +35,7 @@ def robust_min_max(arr, iqr_coeff=1.5):
 
 class AlphaMap(object):
     '''Map data to an alpha channel'''
+
     def __init__(self, alpha_range, data_range=None, 
                  alpha_bounds=None):
         if isinstance(alpha_range, int):
@@ -53,8 +55,7 @@ class AlphaMap(object):
             if len(alpha_bounds) != 2:
                 raise ValueError("alpha_bounds must be two element tuple")
             self._alpha_bounds = alpha_bounds
-        
-    
+
     def apply(self, data):
         '''Return the alpha map for the given data'''
         min_data, max_data = self._data_range
@@ -74,7 +75,8 @@ class AlphaMap(object):
 
 
 class Overlay(object):
-    '''Represent single data overlay'''
+    '''Overlay of scalar image passed through color map / alpha map'''
+
     def __init__(self, data, mask=None, cmap=None, cmap_bounds=None,
                  alpha_map=None, interpolation=None):
         check_dim(data)
@@ -190,7 +192,9 @@ default_cmaps = ['plasma',
                 ]
 '''Default selection of colormaps are all perceptually linear'''
 
+
 def check_shapes(bg_img, overlays):
+    """Check background / overlays have same shape"""
     if bg_img.ndim not in (2, 3):
         raise ValueError("Images must be 2D/3D arrays")
     bg_img = np.atleast_3d(bg_img)
@@ -201,11 +205,79 @@ def check_shapes(bg_img, overlays):
     return bg_img, shape
 
 
-def gen_slice_plots(bg_img, overlays, slice_dim=None, bg_range=None,
-                    title=None, exclude_empty=False, loc_info=False, 
-                    bg_interpolation='bilinear', histo_bins=64, 
-                    max_slice_per_fig=None):
-    '''Generates one or more figures with one or more slices per figure
+def get_slice_multi_idx(slice_idx, slice_dim):
+    """Get tuple for indexing slice of data"""
+    slice_multi_idx = [slice(None) for _ in range(3)]
+    slice_multi_idx[slice_dim] = slice_idx
+    return tuple(slice_multi_idx)
+
+
+def sample_slices(
+    imgs: List[np.ndarray], 
+    slice_dim: int = 2, 
+    max_slices: Optional[int] = None, 
+    exlude_empty: bool = False, 
+    weight_by_val: bool = False
+):
+    """Choose slices from `img` that fit the contraints"""
+    n_dims = 3
+    img = imgs[0]
+    if len(img.shape) < 2:
+        raise ValueError("The img must be 2D+")
+    if any(i.shape != img.shape for i in imgs[1:]):
+        raise ValueError("All input images must have same shape")
+    if n_dims == 2 or img.shape[slice_dim] == 1:
+        return [0]
+    n_slices = img.shape[slice_dim]
+    if (max_slices is None or max_slices >= n_slices) and incl_empty:
+        return list(range(n_slices))
+    slice_densities = np.zeros(n_slices)
+    for img in imgs:
+        for slice_idx in range(n_slices):
+            slice_multi_idx = get_slice_multi_idx(slice_idx, slice_dim)
+            if weight_by_val:
+                slice_densities[slice_idx] += img[slice_multi_idx].sum() 
+            else:
+                slice_densities[slice_idx] += (img[slice_multi_idx] != 0).sum()
+    nz_slices = slice_densities != 0
+    if max_slices is None or nz_slices.sum() <= max_slices:
+        return [i for i, nz in enumerate(nz_slices) if nz]
+    slice_spread = (nz_slices.sum() // max_slices) // 2
+    res = []
+    potential_mask = nz_slices.copy()
+    while len(res) < max_slices and potential_mask.sum():
+        for slice_idx in range(n_slices):
+            if not potential_mask[slice_idx]:
+                slice_densities[slice_idx] = 0.0
+        max_idx = np.argmax(slice_densities)
+        res.append(max_idx)
+        potential_mask[max_idx] = False
+        # TODO: Would be better to do some weighting here instead of hard cutoff, allow
+        #       for slice_spread to be fractional and thus do better when max_slices is
+        #       just over 'n_slices / 2'
+        for n in range(slice_spread):
+            if max_idx + n < n_slices:
+                potential_mask[max_idx + n] = False
+            if max_idx - n > 0:
+                potential_mask[max_idx - n] = False
+    res.sort()
+    return res
+
+
+def gen_slice_plots(
+    bg_img: np.ndarray, 
+    overlays: Iterable[Overlay], 
+    slice_dim: Optional[int] = None, 
+    bg_range: Optional[Tuple[float, float]] = None,
+    title: Optional[str] = None, 
+    exclude_empty: bool = False, 
+    loc_info: bool = False, 
+    bg_interpolation: str = 'bilinear', 
+    histo_bins: int = 64, 
+    max_slice_per_fig: Optional[int] = None, 
+    max_slices: Optional[int] = None,
+):
+    '''Generate one or more image overlay figures with one or more slices per figure
     '''
     bg_img, shape = check_shapes(bg_img, overlays)
     # Choose slice axis if none was specified
@@ -226,22 +298,11 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, bg_range=None,
     for overlay in overlays:
         overlay.transpose(new_order)
     n_slices = bg_img.shape[2]
-
-    # Get list of non-empty slices
-    if exclude_empty:
-        incl_slices = []
-        for slice_idx in range(n_slices):
-            for olay in overlays:
-                if  not olay.is_empty((Ellipsis, slice_idx)):
-                    break
-            else:
-                continue
-            incl_slices.append(slice_idx)
-        print("Including slices: %s" % incl_slices)
-    else:
-        incl_slices = range(n_slices)
+    # Determine which slices to include
+    incl_slices = sample_slices(
+        [o.data for o in overlays], slice_dim, max_slices, exclude_empty
+    )
     n_incl_slices = len(incl_slices)
-
     # Compute plot grid size
     if max_slice_per_fig is not None:
         n_fig = n_incl_slices // max_slice_per_fig
@@ -257,13 +318,11 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, bg_range=None,
         scale = 1.0 / math.sqrt(slice_per_fig)
     else:
         scale = 1.0
-    
     # Compute display scaling factor
     # TODO: Need something better here
     if bg_range is None:
         bg_min, bg_max = robust_min_max(bg_img)
         bg_range = (bg_min / 2, bg_max)
-    
     # Make sure each overlay has a color map, try to make them unique
     used_cmaps = [o.cmap for o in overlays if o.cmap is not None]
     for overlay in overlays:
@@ -283,7 +342,14 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, bg_range=None,
         fig_slices = []
         if slice_per_fig > 1:
             gs = gridspec.GridSpec(n_rows, n_cols)
-            gs.update(left=0.02,right=.98, bottom=0.02, top=0.98, wspace=0.8*scale, hspace=0.1)
+            gs.update(
+                left=0.02, 
+                right=.98, 
+                bottom=0.02, 
+                top=0.98, 
+                wspace=0.8*scale, 
+                hspace=0.1
+            )
             ax_array = [fig.add_subplot(gs[i]) for i in range(slice_per_fig)]
         else:
             ax_array = [fig.gca()]
@@ -318,7 +384,8 @@ def gen_slice_plots(bg_img, overlays, slice_dim=None, bg_range=None,
 
 
 prog_descrip = \
-'''Overlay one or more Niftis ontop of a base image using color maps'''
+'''Create high quality and highly quantitative colormap overlays from Nifti images'''
+
 
 def main(argv=sys.argv):
     arg_parser = argparse.ArgumentParser(description=prog_descrip)
@@ -437,6 +504,7 @@ def main(argv=sys.argv):
             else:
                 full_out = '%s_fig_%03d.%s' % (base, fig_idx, ext)
             fig.savefig(full_out, dpi=fig_dpi)
+        fig.clear()
         pylab.close(fig)
 
 if __name__ == '__main__':
