@@ -20,6 +20,14 @@ def check_dim(img):
         raise ValueError("Images must be 2D/3D arrays")
 
 
+def get_slice_dim(shape: Tuple[int, ...]) -> int:
+    min_dim = np.argmin(shape)
+    if shape[min_dim] < shape[2]:
+        return min_dim
+    else:
+        return 2
+
+
 def robust_min_max(arr, iqr_coeff=1.5):
     '''Get min/max that ignores outliers
 
@@ -28,7 +36,7 @@ def robust_min_max(arr, iqr_coeff=1.5):
     '''
     first_quart, third_quart = np.percentile(arr, (25, 75))
     thresh = (third_quart - first_quart) * iqr_coeff
-    mask = (arr > first_quart - thresh) & (arr < third_quart + thresh)
+    mask = (arr >= first_quart - thresh) & (arr <= third_quart + thresh)
     incl_data = arr[mask]
     return np.min(incl_data), np.max(incl_data)
 
@@ -88,8 +96,10 @@ class Overlay(object):
             self.mask = np.ones_like(self.data)
         self.cmap = cmap
         if cmap_bounds is None:
-            incl_data = self.data[self.mask == 1]
-            cmap_bounds = robust_min_max(incl_data)
+            if self.mask.sum() == 0:
+                cmap_bounds = (0.0, 0.0)
+            else:
+                cmap_bounds = robust_min_max(self.data[self.mask == 1])
         self.cmap_bounds = cmap_bounds
         if alpha_map is None:
             self.alpha_map = AlphaMap(1.0, cmap_bounds)
@@ -114,7 +124,9 @@ class Overlay(object):
         d_sub[d_sub > cmap_ub] = cmap_ub
         d_sub[d_sub < cmap_lb] = cmap_lb
         d_sub -= cmap_lb
-        d_sub /= (cmap_ub - cmap_lb)
+        d_range = (cmap_ub - cmap_lb)
+        if d_range:
+            d_sub /= d_range
         if self.cmap is None:
             cmap = getattr(pylab.cm, default_cmaps[0])
         else:
@@ -151,7 +163,10 @@ class Overlay(object):
         incl_data[incl_data > cmap_ub] = cmap_ub
         n, bins, patches = ax.hist(incl_data, **hist_kwargs)
         bin_centers = 0.5 * (bins[:-1] + bins[1:])
-        col = (bin_centers - cmap_lb) / (cmap_ub - cmap_lb)
+        col = bin_centers - cmap_lb
+        d_range = cmap_ub - cmap_lb
+        if d_range:
+            col /= d_range
         for c, p in zip(col, patches):
             pylab.setp(p, 'facecolor', cmap(c))
             pylab.setp(p, 'edgecolor', 'k')
@@ -214,14 +229,16 @@ def get_slice_multi_idx(slice_idx, slice_dim):
 
 def sample_slices(
     imgs: List[np.ndarray], 
-    slice_dim: int = 2, 
+    slice_dim: Optional[int] = None, 
     max_slices: Optional[int] = None, 
-    exlude_empty: bool = False, 
+    exclude_empty: bool = False, 
     weight_by_val: bool = False
 ):
     """Choose slices from `img` that fit the contraints"""
     n_dims = 3
     img = imgs[0]
+    if slice_dim is None:
+        slice_dim = get_slice_dim(img.shape)
     if len(img.shape) < 2:
         raise ValueError("The img must be 2D+")
     if any(i.shape != img.shape for i in imgs[1:]):
@@ -229,7 +246,7 @@ def sample_slices(
     if n_dims == 2 or img.shape[slice_dim] == 1:
         return [0]
     n_slices = img.shape[slice_dim]
-    if (max_slices is None or max_slices >= n_slices) and incl_empty:
+    if (max_slices is None or max_slices >= n_slices) and not exclude_empty:
         return list(range(n_slices))
     slice_densities = np.zeros(n_slices)
     for img in imgs:
@@ -282,11 +299,7 @@ def gen_slice_plots(
     bg_img, shape = check_shapes(bg_img, overlays)
     # Choose slice axis if none was specified
     if slice_dim is None:
-        min_dim = np.argmin(shape)
-        if shape[min_dim] < shape[2]:
-            slice_dim = min_dim
-        else:
-            slice_dim = 2
+        slice_dim = get_slice_dim(shape)
     # TODO: Should determine slice orientation relative to the patient
     #       and then lay out rows / cols in radiological or neurological
     #       standard.  Instead of transposing, probably better to just 
@@ -297,7 +310,8 @@ def gen_slice_plots(
     bg_img = np.transpose(bg_img, new_order)
     for overlay in overlays:
         overlay.transpose(new_order)
-    n_slices = bg_img.shape[2]
+    slice_dim = 2
+    n_slices = bg_img.shape[slice_dim]
     # Determine which slices to include
     incl_slices = sample_slices(
         [o.data for o in overlays], slice_dim, max_slices, exclude_empty
