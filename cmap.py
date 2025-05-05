@@ -93,7 +93,7 @@ class Overlay(object):
             check_dim(mask)
             self.mask = np.atleast_3d(mask).copy()
         else:
-            self.mask = np.ones_like(self.data)
+            self.mask = np.ones(self.data.shape, np.uint8)
         self.cmap = cmap
         if cmap_bounds is None:
             if self.mask.sum() == 0:
@@ -113,6 +113,11 @@ class Overlay(object):
         
     def is_empty(self, index):
         return np.count_nonzero(self.mask[index]) == 0
+
+    def get_masked_data(self):
+        res = self.data.copy()
+        res[self.mask == 0] = 0
+        return res
     
     def get_rgba(self, index):
         d_sub = self.data[index].copy()
@@ -314,7 +319,7 @@ def gen_slice_plots(
     n_slices = bg_img.shape[slice_dim]
     # Determine which slices to include
     incl_slices = sample_slices(
-        [o.data for o in overlays], slice_dim, max_slices, exclude_empty
+        [o.mask for o in overlays], slice_dim, max_slices, exclude_empty
     )
     n_incl_slices = len(incl_slices)
     # Compute plot grid size
@@ -470,11 +475,11 @@ def main(argv=sys.argv):
     if args.slices_per_fig is not None:
         args.slices_per_fig = int(args.slices_per_fig)  
     bg_nii = nb.load(args.bg_img)
-    bg_img = bg_nii.get_data()
+    bg_img = np.asarray(bg_nii.dataobj)
     
     fg_nii = nb.load(args.fg_img)
     if args.mask:
-        mask = nb.load(args.mask).get_data()
+        mask = np.asarray(nb.load(args.mask).dataobj)
     else:
         mask = None
     if args.alpha is not None:
@@ -483,7 +488,7 @@ def main(argv=sys.argv):
                              args.alpha_bounds)
     else:
         alpha_map = None
-    overlay = Overlay(fg_nii.get_data(), 
+    overlay = Overlay(np.asarray(fg_nii.dataobj), 
                       mask, 
                       args.color_map, 
                       args.data_range,
